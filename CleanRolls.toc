@@ -1,0 +1,9 @@
+## Interface: 11200
+## Title: |cffa335eeCleanRolls|r by |cffff0000K|r|cffff7f00o|r|cffffff00b|r|cff00ff00e|r|cff0080ffn|r|cff8b00ffi|r
+## Notes: A floating window that tracks group loot rolls (Need/Greed/etc) in real time, lets you roll from it, and fades out once the winner is announced.
+## Author: kobeniiiiii
+## OptionalDeps: pfUI
+## Version: 1.0.0
+## SavedVariables: CleanRollsDB
+
+CleanRolls.lua
