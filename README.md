@@ -27,7 +27,7 @@ A panel pops up the moment an item starts being rolled on, with the item's icon 
 
 ![Resolved rolls, grouped by type, winner flashed green](screenshots/winner-flash.png)
 
-- **Need/Greed/Pass buttons right on the panel** - if you're eligible to roll, click straight from the window instead of tabbing over to a separate popup. Buttons stay put through a Bind-on-Pickup confirmation ("Looting this item will bind to you") instead of vanishing before you've answered it.
+- **Replaces the stock loot roll popup entirely** - CleanRolls suppresses the default (or pfUI-reskinned) Need/Greed/Pass popup and shows its own buttons right on the panel instead, so there's nothing else to find or tab over to. Buttons stay put through a Bind-on-Pickup confirmation ("Looting this item will bind to you") instead of vanishing before you've answered it.
 - **A real countdown**, while you still have a decision to make - your actual roll timer if it's your own eligible roll, otherwise an honest "no timer available" readout if you're only watching someone else's roll play out.
 - **The winner's row flashes gold, then eases into green** and stays there, so you don't have to go hunting for the "X won it!" line.
 - Every outcome resolves and fades on its own: someone wins, everyone passes, nobody rolls at all, or the roll times out - each one clears the panel after a few seconds instead of leaving it stuck open.
@@ -47,6 +47,7 @@ This works two ways, and doesn't require RollFor to be installed for you to see 
 
 - Chat-text parsing is exactly that - if a server or RollFor update changes its wording, a pattern can silently stop matching. Nothing breaks, it just stops picking that one thing up.
 - When more than one un-rolled item is open at once, an individual `/roll` is attributed to whichever item's reserve list contains that person's name; failing that, to the oldest still-open item with no reserve list at all. This is usually exactly right, but it's a best guess from chat text, not authoritative state, for anyone not using RollFor's addon-comm sync.
+- If some other addon also overrides the stock loot roll popup (the same thing pfUI's roll module does), whichever one loads last wins and the other's override silently doesn't apply. Not unique to CleanRolls - any addon doing this kind of override carries the same tradeoff.
 
 ## Credits
 

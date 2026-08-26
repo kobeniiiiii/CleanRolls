@@ -316,6 +316,28 @@ local function ApplySavedAnchorState()
     end
 end
 
+-- Suppresses the stock (or pfUI-reskinned) group loot roll popup - our own
+-- START_LOOT_ROLL handler further down already builds our own panel
+-- independently, so showing both would just be redundant. This is the
+-- exact same single hook Blizzard's FrameXML calls in response to
+-- START_LOOT_ROLL, and the exact same one pfUI's own roll module
+-- (pfUI/modules/roll.lua) overrides to redirect to ITS frames instead of
+-- the stock ones - we just replace it with a no-op instead of a redirect,
+-- since we don't need it to draw anything at all.
+--
+-- Applied at PLAYER_LOGIN specifically, not at file-load time, so this
+-- always wins the "last one to (re)assign this global wins" race
+-- regardless of whether pfUI's own file happens to load before or after
+-- ours - by PLAYER_LOGIN, every addon's own top-level file code (pfUI's
+-- included) has already run and already made its own assignment.
+--
+-- Same tradeoff pfUI's own override already carries: if some OTHER addon
+-- also overrides this same global, whichever of us sets it last wins and
+-- silently disables the other. Not something unique to this override.
+local function SuppressStockRollFrame()
+    _G.GroupLootFrame_OpenNewFrame = function() end
+end
+
 -- ===================== UI: panels =====================
 
 local panelPool = {}
@@ -1502,6 +1524,7 @@ eventFrame:SetScript("OnEvent", function()
         end
     elseif event == "PLAYER_LOGIN" then
         ApplySavedAnchorState()
+        SuppressStockRollFrame()
         DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r loaded. Type /cleanrolls for options.")
     end
 end)
