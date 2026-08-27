@@ -20,6 +20,7 @@ Nothing to turn on - it starts watching the moment you log in. A small **Loot Ro
 - `/cr reset` - reset window position
 - `/cr test` - preview the window with fake rolls (no real loot needed)
 - `/cr rftest` / `/cr rfbtest` - same, for the RollFor integration specifically
+- `/cr debug` - off by default; logs exactly what chat text/RollFor broadcasts arrive and how they're parsed to `CleanRolls_debug.log` (in the client's `CustomData` folder, requires Nampower v3.2+) instead of spamming chat, for troubleshooting after a raid rather than during one
 
 ## How it works
 
@@ -47,6 +48,7 @@ This works two ways, and doesn't require RollFor to be installed for you to see 
 
 - Chat-text parsing is exactly that - if a server or RollFor update changes its wording, a pattern can silently stop matching. Nothing breaks, it just stops picking that one thing up.
 - When more than one un-rolled item is open at once, an individual `/roll` is attributed to whichever item's reserve list contains that person's name; failing that, to the oldest still-open item with no reserve list at all. This is usually exactly right, but it's a best guess from chat text, not authoritative state, for anyone not using RollFor's addon-comm sync.
+- If the exact same item drops more than once at once, each drop gets its own independent roll (its own buttons, its own timer, its own winner) - that part is authoritative, tied to the real roll ID the game gives each one. But *whose name goes on which copy's roll list* is still a best guess from chat text, same as above, since a chat line like "X rolled Greed for [Item]" doesn't say which of the two simultaneous rolls it belongs to. pfUI's own chat-derived roll display has this identical limitation, for the identical reason.
 - If some other addon also overrides the stock loot roll popup (the same thing pfUI's roll module does), whichever one loads last wins and the other's override silently doesn't apply. Not unique to CleanRolls - any addon doing this kind of override carries the same tradeoff.
 
 ## Credits

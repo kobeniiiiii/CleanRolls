@@ -33,6 +33,42 @@ local rollforPending = {}
 -- defined earlier in the file, needs to reference it directly.
 local currentRollForItem = nil
 
+-- ===================== Debug logging =====================
+-- Off by default - toggle with /cr debug. Writes to a real file
+-- (WriteCustomFile, a Nampower v3.2+ API) instead of chat, so it doesn't
+-- spam the screen during a live raid - same pattern as CombatLedger's own
+-- CL.LogLine/FlushLog (see CombatLedger/Core.lua). WriteCustomFile lands
+-- it in the client's CustomData directory (sibling to WTF/Interface, at
+-- the WoW install root) - find CleanRolls_debug.log there afterward to
+-- see exactly what chat text/broadcasts arrived and how each one got
+-- parsed. Built specifically to debug the RollFor SR/HR paths, since
+-- those are the ones that can't be exercised by /cr test/rftest/rfbtest
+-- against real server wording.
+local DEBUG_LOG_FILENAME = "CleanRolls_debug.log"
+local debugEnabled = false
+local debugLogBuffer = {}
+local debugLoggedThisSession = false -- first flush of a session overwrites (fresh file per test), later ones append
+
+local function LogLine(line)
+    if not debugEnabled then return end
+    table.insert(debugLogBuffer, string.format("[%.1f] %s", GetTime(), line))
+end
+
+local function FlushDebugLog()
+    if table.getn(debugLogBuffer) == 0 then return end
+    if not WriteCustomFile then return end
+
+    local content = table.concat(debugLogBuffer, "\n") .. "\n"
+    local mode = debugLoggedThisSession and "a" or "w"
+    local ok = pcall(WriteCustomFile, DEBUG_LOG_FILENAME, content, mode)
+    if ok then
+        debugLoggedThisSession = true
+        debugLogBuffer = {}
+    end
+    -- on failure, leave the buffer intact and retry on the next flush
+    -- rather than silently dropping data
+end
+
 -- ===================== Config =====================
 
 local DISPLAY_HOLD_TIME = 5.5   -- seconds to keep a finished/won item visible before fading
@@ -214,8 +250,18 @@ local function NewItemData(itemKey, itemName, itemLink, texture, quality)
     }
 end
 
-local function GetOrCreateItem(itemKey, itemName, itemLink)
-    local data = active[itemKey]
+-- `baseItemKey` (always plain itemID:suffixID) is what GetItemInfo/icon
+-- resolution uses - it's the item's real identity. `storageKey` (defaults
+-- to baseItemKey) is what `active`/`order` actually index by, and can
+-- differ from it: when the same item drops more than once, each drop gets
+-- its own independent native rollID and needs its own panel, so
+-- START_LOOT_ROLL's handler passes a baseItemKey:rollID composite as the
+-- storageKey instead. See FindOrCreateNativeItem's own comment for the
+-- full reasoning (matches pfUI/modules/roll.lua's own per-rollID frame
+-- pooling for this exact scenario).
+local function GetOrCreateItem(baseItemKey, itemName, itemLink, storageKey)
+    storageKey = storageKey or baseItemKey
+    local data = active[storageKey]
     if data then
         data.lastActivity = GetTime()
         if data.fading then
@@ -236,14 +282,52 @@ local function GetOrCreateItem(itemKey, itemName, itemLink)
     -- missing-texture placeholder instead of failing loudly.
     local texture, name, quality
     if GetItemInfo then
-        local iName, iLink, iQuality, _, _, _, _, _, iTexture = GetItemInfo(ItemStringForKey(itemKey))
+        local iName, iLink, iQuality, _, _, _, _, _, iTexture = GetItemInfo(ItemStringForKey(baseItemKey))
         texture, name, quality = iTexture, iName, iQuality
     end
 
-    data = NewItemData(itemKey, name or itemName, itemLink, texture, quality)
-    active[itemKey] = data
-    table.insert(order, itemKey)
+    data = NewItemData(storageKey, name or itemName, itemLink, texture, quality)
+    data.baseItemKey = baseItemKey
+    active[storageKey] = data
+    table.insert(order, storageKey)
     return data
+end
+
+-- Routes a native chat-text roll line (someone's Greed/Need/Pass
+-- selection, a winner announcement, "has passed on:", etc.) to the right
+-- panel when the same item has more than one independent roll open at
+-- once - e.g. "2x [Item]" dropping fires two separate START_LOOT_ROLL
+-- events, each with its own rollID and its own panel (see that handler
+-- below). The chat text itself carries no rollID at all though - WoW
+-- doesn't say which of two simultaneous rolls on an identical item a
+-- given line belongs to - so this is a best guess, not authoritative:
+-- attribute to whichever active, not-yet-resolved panel for this item
+-- was created first. Same class of limitation pfUI's own chat-derived
+-- roll cache has (pfUI.roll.cache is keyed by item NAME, not rollID, for
+-- the identical reason) - the popup/buttons/timer are the only piece
+-- that can be reliably separated, because those come from the real
+-- rollID via GetLootRollItemInfo/RollOnLoot, not from chat text.
+local function FindOrCreateNativeItem(itemID, suffixID, name, itemText)
+    local baseKey = ItemKey(itemID, suffixID)
+
+    local best, matchCount = nil, 0
+    for _, key in ipairs(order) do
+        local d = active[key]
+        if d and d.baseItemKey == baseKey and not d.winner and not d.resolved then
+            matchCount = matchCount + 1
+            if not best or d.createdAt < best.createdAt then
+                best = d
+            end
+        end
+    end
+    if best then
+        if matchCount > 1 then
+            LogLine("[NATIVE_ATTR] baseKey=" .. baseKey .. " -> " .. matchCount .. " simultaneous open rolls on this item, best-guessed the oldest (itemKey=" .. best.itemKey .. ")")
+        end
+        return best
+    end
+
+    return GetOrCreateItem(baseKey, name, itemText)
 end
 
 local function AddOrUpdateRoll(data, name, kind, value)
@@ -917,62 +1001,53 @@ local EVERYONE_PASSED_PATTERN = "^Everyone has passed on: (.+)$"
 local function HandleRollLine(kindWord, valueStr, itemText, playerName)
     local itemID, suffixID, name = ExtractItemFromText(itemText)
     if not itemID then return end
-    local itemKey = ItemKey(itemID, suffixID)
-    local data = GetOrCreateItem(itemKey, name, itemText)
+    local data = FindOrCreateNativeItem(itemID, suffixID, name, itemText)
     AddOrUpdateRoll(data, playerName, string.upper(kindWord), tonumber(valueStr))
-    RefreshPanel(itemKey)
+    RefreshPanel(data.itemKey)
     Reflow()
 end
 
 local function HandleHasSelectedLine(playerName, kindWord, itemText)
     local itemID, suffixID, name = ExtractItemFromText(itemText)
     if not itemID then return end
-    local itemKey = ItemKey(itemID, suffixID)
-    local data = GetOrCreateItem(itemKey, name, itemText)
+    local data = FindOrCreateNativeItem(itemID, suffixID, name, itemText)
     -- no roll number yet (AddOrUpdateRoll dedupes by name, so the later
     -- "Greed Roll - N ... by Name" line just fills this same row in)
     AddOrUpdateRoll(data, playerName, string.upper(kindWord), nil)
-    RefreshPanel(itemKey)
+    RefreshPanel(data.itemKey)
     Reflow()
 end
 
 local function HandleWinLine(winnerName, itemText)
     local itemID, suffixID, name = ExtractItemFromText(itemText)
     if not itemID then return end
-    local itemKey = ItemKey(itemID, suffixID)
-    local data = active[itemKey]
-    if not data then
-        -- winner line with no prior roll lines seen (e.g. only one eligible roller)
-        data = GetOrCreateItem(itemKey, name, itemText)
-    end
+    -- winner line with no prior roll lines seen for this item at all is
+    -- covered by FindOrCreateNativeItem's own fallback (e.g. only one
+    -- eligible roller, so there was nothing else to log before this)
+    local data = FindOrCreateNativeItem(itemID, suffixID, name, itemText)
 
     local isSelf = (winnerName == PLAYER_NAME or winnerName == "You")
     data.winner = {name = isSelf and PLAYER_NAME or winnerName, isSelf = isSelf}
     data.winnerFlashStart = GetTime()
     data.canRoll = false
     data.lastActivity = GetTime()
-    RefreshPanel(itemKey)
+    RefreshPanel(data.itemKey)
     Reflow()
 end
 
 local function HandleHasPassedLine(playerName, itemText)
     local itemID, suffixID, name = ExtractItemFromText(itemText)
     if not itemID then return end
-    local itemKey = ItemKey(itemID, suffixID)
-    local data = GetOrCreateItem(itemKey, name, itemText)
+    local data = FindOrCreateNativeItem(itemID, suffixID, name, itemText)
     AddOrUpdateRoll(data, playerName, "PASS", 0)
-    RefreshPanel(itemKey)
+    RefreshPanel(data.itemKey)
     Reflow()
 end
 
 local function HandleEveryonePassedLine(itemText)
     local itemID, suffixID, name = ExtractItemFromText(itemText)
     if not itemID then return end
-    local itemKey = ItemKey(itemID, suffixID)
-    local data = active[itemKey]
-    if not data then
-        data = GetOrCreateItem(itemKey, name, itemText)
-    end
+    local data = FindOrCreateNativeItem(itemID, suffixID, name, itemText)
 
     -- no winner to report, but just as resolved as one - see `resolved`
     -- flag's own comment for why this needs to fade on the normal timer
@@ -980,7 +1055,7 @@ local function HandleEveryonePassedLine(itemText)
     data.resolved = true
     data.canRoll = false
     data.lastActivity = GetTime()
-    RefreshPanel(itemKey)
+    RefreshPanel(data.itemKey)
     Reflow()
 end
 
@@ -1064,9 +1139,13 @@ local function HandleRollForItemLine(text)
     local _, _, hrItemText = string.find(text, "^%d+%.%s*(.-)%s*%(HR%)$")
     if hrItemText then
         local itemID, suffixID, name = ExtractItemFromText(hrItemText)
-        if not itemID then return end
+        if not itemID then
+            LogLine("[RF_ITEM] matched HR pattern but couldn't extract an itemID from: " .. hrItemText)
+            return
+        end
         local itemKey = ItemKey(itemID, suffixID)
         local data = GetOrCreateItem(itemKey, name, hrItemText)
+        LogLine("[RF_ITEM] HR itemKey=" .. itemKey .. " name=" .. tostring(name) .. " icon=" .. tostring(data.icon) .. " quality=" .. tostring(data.quality))
         data.isHR = true
         data.canRoll = false
         data.resolved = true -- no real "awarded" chat line ever comes for HR - the badge itself is the resolution
@@ -1077,16 +1156,22 @@ local function HandleRollForItemLine(text)
         -- rolls meant for a genuinely-open item
         RefreshPanel(itemKey)
         Reflow()
-        return
+        return true
     end
 
     local _, _, srItemText, srListText = string.find(text, "^%d+%.%s*(.-)%s*%(SR by (.+)%)$")
     if srItemText then
         local itemID, suffixID, name = ExtractItemFromText(srItemText)
-        if not itemID then return end
+        if not itemID then
+            LogLine("[RF_ITEM] matched SR pattern but couldn't extract an itemID from: " .. srItemText)
+            return
+        end
         local itemKey = ItemKey(itemID, suffixID)
         local data = GetOrCreateItem(itemKey, name, srItemText)
         data.srList = SplitNameList(srListText)
+        LogLine("[RF_ITEM] SR itemKey=" .. itemKey .. " name=" .. tostring(name)
+            .. " rawSrListText=\"" .. srListText .. "\" parsedNames=" .. table.concat(data.srList, "|")
+            .. " count=" .. table.getn(data.srList))
 
         if table.getn(data.srList) > 1 then
             -- contested: someone still has to actually /roll 100 for it -
@@ -1096,9 +1181,12 @@ local function HandleRollForItemLine(text)
                 if n == PLAYER_NAME then
                     data.canRoll = true
                     data.rollForSelfSR = true
+                    LogLine("[RF_ITEM] -> you're on this SR list, Need button enabled")
                     break
                 end
             end
+        else
+            LogLine("[RF_ITEM] -> solo SR, expecting a \"soft-ressed\" auto-award line, no button/pending-queue entry")
         end
         -- a solo SR ("(SR by OnlyOnePerson)") never has a /roll at all -
         -- RollFor auto-awards it straight off the "X soft-ressed [Item]."
@@ -1107,27 +1195,38 @@ local function HandleRollForItemLine(text)
 
         RefreshPanel(itemKey)
         Reflow()
-        return
+        return true
     end
 
     local _, _, freeItemText = string.find(text, "^%d+%.%s*(.+)$")
     if freeItemText then
         local itemID, suffixID, name = ExtractItemFromText(freeItemText)
-        if not itemID then return end -- not actually an item line (e.g. unrelated raid chat starting with a number)
+        if not itemID then return false end -- not actually an item line (e.g. unrelated raid chat starting with a number)
         local itemKey = ItemKey(itemID, suffixID)
         local data = GetOrCreateItem(itemKey, name, freeItemText)
+        LogLine("[RF_ITEM] free-roll itemKey=" .. itemKey .. " name=" .. tostring(name))
         RollForPushPending(itemKey)
         RefreshPanel(itemKey)
         Reflow()
+        return true
     end
+
+    return false
 end
 
 local function ResolveRollForItem(itemText, winnerName, value)
     local itemID, suffixID = ExtractItemFromText(itemText)
-    if not itemID then return end
+    if not itemID then
+        LogLine("[RF_RESOLVE] couldn't extract an itemID from: " .. itemText)
+        return
+    end
     local itemKey = ItemKey(itemID, suffixID)
     local data = active[itemKey]
-    if not data then return end -- never saw the announce line for this one
+    if not data then
+        LogLine("[RF_RESOLVE] itemKey=" .. itemKey .. " winner=" .. tostring(winnerName) .. " -> not tracked (never saw its announce line)")
+        return
+    end
+    LogLine("[RF_RESOLVE] itemKey=" .. itemKey .. " winner=" .. tostring(winnerName) .. " value=" .. tostring(value))
 
     RollForResolvePending(itemKey)
     data.canRoll = false
@@ -1156,24 +1255,28 @@ end
 local function HandleRollForWinnerLine(text)
     local _, _, rollersText, valueStr, itemText = string.find(text, "^(.+) .-rolled the .-highest %((%d+)%) for (.+)%.$")
     if rollersText then
+        LogLine("[RF_WIN] matched \"rolled the highest\" pattern, rollers=" .. rollersText .. " value=" .. valueStr)
         ResolveRollForItem(itemText, SplitNameList(rollersText)[1], tonumber(valueStr))
         return true
     end
 
     local _, _, srWinner, itemText2 = string.find(text, "^(.+) soft%-ressed (.+)%.$")
     if srWinner then
+        LogLine("[RF_WIN] matched \"soft-ressed\" auto-award pattern, winner=" .. srWinner)
         ResolveRollForItem(itemText2, SplitNameList(srWinner)[1], nil)
         return true
     end
 
     local _, _, rrWinner, itemText3 = string.find(text, "^(.+) wins (.+) %(raid%-roll%)%.$")
     if rrWinner then
+        LogLine("[RF_WIN] matched \"raid-roll\" pattern, winner=" .. rrWinner)
         ResolveRollForItem(itemText3, rrWinner, nil)
         return true
     end
 
     local _, _, itemText4 = string.find(text, "^No one rolled for (.+)%.$")
     if itemText4 then
+        LogLine("[RF_WIN] matched \"No one rolled\" pattern")
         ResolveRollForItem(itemText4, nil, nil)
         return true
     end
@@ -1209,14 +1312,22 @@ local function HandleSystemRollLine(text)
     if not name then return end
 
     local itemKey = currentRollForItem or FindPendingRollForItem(name)
-    if not itemKey then return end -- no RollFor item currently pending
+    if not itemKey then
+        LogLine("[RF_ROLL] " .. name .. " rolled " .. valueStr .. " (max " .. maxStr .. ") -> no pending RollFor item to attribute it to, ignored")
+        return
+    end
     local data = active[itemKey]
-    if not data then return end
+    if not data then
+        LogLine("[RF_ROLL] attributed to itemKey=" .. itemKey .. " but that item isn't tracked anymore, ignored")
+        return
+    end
 
     -- prefer this item's own broadcast-derived thresholds (the raid's
     -- actual configured ms/os/tmog ranges) over the generic 100/99/98 guess
     local kind = (data.rollThresholds and data.rollThresholds[tonumber(maxStr)])
         or ROLL_RANGE_KIND[tonumber(maxStr)] or "ROLL"
+    LogLine("[RF_ROLL] " .. name .. " rolled " .. valueStr .. " (max " .. maxStr .. ") -> itemKey=" .. itemKey
+        .. " kind=" .. kind .. " (via " .. (currentRollForItem and "currentRollForItem" or "FindPendingRollForItem") .. ")")
     AddOrUpdateRoll(data, name, kind, tonumber(valueStr))
     RefreshPanel(itemKey)
     Reflow()
@@ -1258,11 +1369,20 @@ local ROLLFOR_TYPE_KIND = {
 -- parser for their custom format.
 local function DecodeRollForPayload(dataStr)
     if not dataStr or dataStr == "" or dataStr == "nil" then return nil end
-    if not loadstring then return nil end
+    if not loadstring then
+        LogLine("[RF_BC_DECODE] loadstring not available on this client - can't decode broadcast payloads at all")
+        return nil
+    end
     local chunk = loadstring("return " .. dataStr)
-    if not chunk then return nil end
+    if not chunk then
+        LogLine("[RF_BC_DECODE] loadstring FAILED to compile - dataStr=" .. dataStr)
+        return nil
+    end
     local ok, result = pcall(chunk)
-    if not ok then return nil end
+    if not ok then
+        LogLine("[RF_BC_DECODE] runtime error executing decoded chunk: " .. tostring(result) .. " - dataStr=" .. dataStr)
+        return nil
+    end
     return result
 end
 
@@ -1298,7 +1418,10 @@ local function HandleRollForChunk(sender, rest)
 end
 
 local function HandleRollForStart(payload)
-    if not payload or not payload.i or not payload.i.id then return end
+    if not payload or not payload.i or not payload.i.id then
+        LogLine("[RF_BC_START] payload missing/malformed - payload=" .. tostring(payload))
+        return
+    end
     local itemID = payload.i.id
     local itemKey = ItemKey(itemID, "0")
     local rawName = payload.i.n and string.gsub(payload.i.n, "_", " ") or nil
@@ -1318,23 +1441,29 @@ local function HandleRollForStart(payload)
         if payload.th.os then data.rollThresholds[payload.th.os] = "OFFSPEC" end
         if payload.th.tm then data.rollThresholds[payload.th.tm] = "TRANSMOG" end
     end
+    LogLine("[RF_BC_START] itemKey=" .. itemKey .. " name=" .. tostring(rawName) .. " icon=" .. tostring(data.icon)
+        .. " quality=" .. tostring(data.quality) .. " seconds=" .. tostring(payload.s)
+        .. " thresholds ms/os/tm=" .. tostring(payload.th and payload.th.ms) .. "/" .. tostring(payload.th and payload.th.os) .. "/" .. tostring(payload.th and payload.th.tm))
 
     if payload.sr and table.getn(payload.sr) > 0 then
         data.srList = {}
         for _, p in ipairs(payload.sr) do
             table.insert(data.srList, p.n)
         end
+        LogLine("[RF_BC_START] -> srList=" .. table.concat(data.srList, "|"))
         if table.getn(data.srList) > 1 then
             RollForPushPending(itemKey)
             for _, n in ipairs(data.srList) do
                 if n == PLAYER_NAME then
                     data.canRoll = true
                     data.rollForSelfSR = true
+                    LogLine("[RF_BC_START] -> you're on this SR list, Need button enabled")
                     break
                 end
             end
         end
     else
+        LogLine("[RF_BC_START] -> free-roll (no SR list)")
         RollForPushPending(itemKey) -- free-roll item
     end
 
@@ -1344,18 +1473,26 @@ local function HandleRollForStart(payload)
 end
 
 local function HandleRollForRoll(payload)
-    if not payload or not currentRollForItem then return end
+    if not payload or not currentRollForItem then
+        LogLine("[RF_BC_ROLL] dropped - payload=" .. tostring(payload) .. " currentRollForItem=" .. tostring(currentRollForItem))
+        return
+    end
     local data = active[currentRollForItem]
     if not data then return end
 
     local kind = ROLLFOR_TYPE_KIND[payload.rt] or "ROLL"
+    LogLine("[RF_BC_ROLL] " .. tostring(payload.pn) .. " rolled " .. tostring(payload.r) .. " rt=" .. tostring(payload.rt)
+        .. " -> kind=" .. kind .. " itemKey=" .. currentRollForItem)
     AddOrUpdateRoll(data, payload.pn, kind, payload.r)
     RefreshPanel(currentRollForItem)
     Reflow()
 end
 
 local function HandleRollForFinish(payload)
-    if not currentRollForItem then return end
+    if not currentRollForItem then
+        LogLine("[RF_BC_FINISH] dropped - no currentRollForItem")
+        return
+    end
     local itemKey = currentRollForItem
     currentRollForItem = nil
     RollForResolvePending(itemKey)
@@ -1366,12 +1503,14 @@ local function HandleRollForFinish(payload)
     data.canRoll = false
     if payload and table.getn(payload) > 0 then
         local winner = payload[1]
+        LogLine("[RF_BC_FINISH] itemKey=" .. itemKey .. " winner=" .. tostring(winner.n))
         data.winner = {name = winner.n, isSelf = (winner.n == PLAYER_NAME)}
         data.winnerFlashStart = GetTime()
     else
         -- an empty winners payload means nobody rolled - no winner, but
         -- just as resolved as one; same as the chat-text "No one rolled
         -- for X." case
+        LogLine("[RF_BC_FINISH] itemKey=" .. itemKey .. " -> empty winners payload, nobody rolled")
         data.resolved = true
     end
     data.lastActivity = GetTime()
@@ -1384,6 +1523,7 @@ local function HandleRollForCancel()
     local itemKey = currentRollForItem
     currentRollForItem = nil
     RollForResolvePending(itemKey)
+    LogLine("[RF_BC_CANCEL] itemKey=" .. itemKey)
 
     local data = active[itemKey]
     if data then
@@ -1395,10 +1535,17 @@ local function HandleRollForCancel()
 end
 
 local function HandleRollForAwarded(payload)
-    if not payload or not payload.id then return end
+    if not payload or not payload.id then
+        LogLine("[RF_BC_AWARDED] payload missing/malformed - payload=" .. tostring(payload))
+        return
+    end
     local itemKey = ItemKey(payload.id, "0")
     local data = active[itemKey]
-    if not data then return end -- an item we never saw START_ROLL/an announce line for
+    if not data then
+        LogLine("[RF_BC_AWARDED] itemKey=" .. itemKey .. " winner=" .. tostring(payload.pn) .. " -> not tracked (never saw START_ROLL/an announce line)")
+        return
+    end
+    LogLine("[RF_BC_AWARDED] itemKey=" .. itemKey .. " winner=" .. tostring(payload.pn) .. " alreadyHadWinner=" .. tostring(data.winner ~= nil))
 
     if not data.winner then
         data.winner = {name = payload.pn, isSelf = (payload.pn == PLAYER_NAME)}
@@ -1419,10 +1566,14 @@ local function HandleRollForBroadcast(msg, sender)
     local command, dataStr
     if string.find(rest, "^CHUNK::") then
         command, dataStr = HandleRollForChunk(sender, rest)
-        if not command then return end -- still waiting on more chunks
+        if not command then
+            LogLine("[RF_BC] chunk buffered, waiting on more pieces")
+            return
+        end
     else
         command, dataStr = SplitRollForCommand(rest)
     end
+    LogLine("[RF_BC] command=" .. tostring(command) .. " rawData=" .. dataStr)
 
     local payload = DecodeRollForPayload(dataStr)
     if command == "START_ROLL" then
@@ -1452,23 +1603,29 @@ eventFrame:RegisterEvent("CHAT_MSG_PARTY")
 eventFrame:RegisterEvent("CHAT_MSG_SYSTEM")
 eventFrame:RegisterEvent("CHAT_MSG_ADDON")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
+eventFrame:RegisterEvent("PLAYER_LOGOUT")
 
 eventFrame:SetScript("OnEvent", function()
     if event == "CHAT_MSG_LOOT" then
+        LogLine("[CHAT_LOOT] " .. arg1)
+
         local _, _, kindWord, valueStr, itemText, playerName = string.find(arg1, ROLL_LINE_PATTERN)
         if kindWord then
+            LogLine("[CHAT_LOOT] -> ROLL_LINE kind=" .. kindWord .. " value=" .. valueStr .. " player=" .. playerName)
             HandleRollLine(kindWord, valueStr, itemText, playerName)
             return
         end
 
         local _, _, winnerName, itemText2 = string.find(arg1, WIN_LINE_PATTERN)
         if winnerName then
+            LogLine("[CHAT_LOOT] -> WIN_LINE winner=" .. winnerName)
             HandleWinLine(winnerName, itemText2)
             return
         end
 
         local _, _, selectedName, selectedKind, itemText3 = string.find(arg1, HAS_SELECTED_PATTERN)
         if selectedName then
+            LogLine("[CHAT_LOOT] -> HAS_SELECTED player=" .. selectedName .. " kind=" .. selectedKind)
             HandleHasSelectedLine(selectedName, selectedKind, itemText3)
             return
         end
@@ -1478,32 +1635,51 @@ eventFrame:SetScript("OnEvent", function()
         -- capture and get treated as a player named "Everyone"
         local _, _, itemText5 = string.find(arg1, EVERYONE_PASSED_PATTERN)
         if itemText5 then
+            LogLine("[CHAT_LOOT] -> EVERYONE_PASSED")
             HandleEveryonePassedLine(itemText5)
             return
         end
 
         local _, _, passedName, itemText4 = string.find(arg1, HAS_PASSED_PATTERN)
         if passedName then
+            LogLine("[CHAT_LOOT] -> HAS_PASSED player=" .. passedName)
             HandleHasPassedLine(passedName, itemText4)
             return
         end
+
+        LogLine("[CHAT_LOOT] -> no pattern matched")
     elseif event == "START_LOOT_ROLL" then
         local rollID, rollTime = arg1, arg2
         local itemLink = GetLootRollItemLink and GetLootRollItemLink(rollID)
+        LogLine("[START_LOOT_ROLL] rollID=" .. tostring(rollID) .. " rollTime=" .. tostring(rollTime) .. " itemLink=" .. tostring(itemLink))
         if not itemLink then return end
         local itemID, suffixID, name = ExtractItemFromText(itemLink)
-        if not itemID then return end
-        local itemKey = ItemKey(itemID, suffixID)
+        if not itemID then
+            LogLine("[START_LOOT_ROLL] -> could not extract itemID from link")
+            return
+        end
+        local baseItemKey = ItemKey(itemID, suffixID)
+        -- always keyed by rollID, never bare baseItemKey - if the same
+        -- item drops more than once, each drop gets its own independent
+        -- START_LOOT_ROLL/rollID, and reusing a bare item-identity key
+        -- would let the second one silently overwrite the first one's
+        -- rollID in the same panel, leaving only one of the two actually
+        -- rollable. See FindOrCreateNativeItem's own comment - same
+        -- approach pfUI/modules/roll.lua uses (one frame per rollID, via
+        -- its 4-slot frame pool).
+        local storageKey = baseItemKey .. ":roll" .. tostring(rollID)
+        LogLine("[START_LOOT_ROLL] -> baseItemKey=" .. baseItemKey .. " storageKey=" .. storageKey .. " name=" .. tostring(name))
 
-        local data = GetOrCreateItem(itemKey, name, itemLink)
+        local data = GetOrCreateItem(baseItemKey, name, itemLink, storageKey)
         data.rollID = rollID
         data.rollTime = rollTime or 60
         data.canRoll = true
         data.rollStart = GetTime()
 
-        RefreshPanel(itemKey)
+        RefreshPanel(data.itemKey)
         Reflow()
     elseif event == "CANCEL_LOOT_ROLL" then
+        LogLine("[CANCEL_LOOT_ROLL] rollID=" .. tostring(arg1))
         for itemKey, data in pairs(active) do
             if data.rollID == arg1 then
                 data.canRoll = false
@@ -1513,29 +1689,58 @@ eventFrame:SetScript("OnEvent", function()
             end
         end
     elseif event == "CHAT_MSG_RAID" or event == "CHAT_MSG_RAID_WARNING" or event == "CHAT_MSG_PARTY" then
-        if not HandleRollForWinnerLine(arg1) then
-            HandleRollForItemLine(arg1)
+        LogLine("[" .. event .. "] " .. arg1)
+        if HandleRollForWinnerLine(arg1) then
+            LogLine("[" .. event .. "] -> matched a RollFor winner/resolution line")
+        elseif not HandleRollForItemLine(arg1) then
+            LogLine("[" .. event .. "] -> no RollFor pattern matched")
+        else
+            LogLine("[" .. event .. "] -> matched a RollFor item announcement line")
         end
     elseif event == "CHAT_MSG_SYSTEM" then
+        if string.find(arg1, "^.+ rolls %d+ %(%d+%-%d+%)$") then
+            LogLine("[CHAT_SYSTEM] " .. arg1 .. " | currentRollForItem=" .. tostring(currentRollForItem)
+                .. " rollforPending=" .. table.getn(rollforPending))
+        end
         HandleSystemRollLine(arg1)
     elseif event == "CHAT_MSG_ADDON" then
         if arg1 == ROLLFOR_ADDON_PREFIX then
+            LogLine("[CHAT_ADDON] prefix=" .. arg1 .. " sender=" .. tostring(arg4) .. " msg=" .. arg2)
             HandleRollForBroadcast(arg2, arg4)
         end
     elseif event == "PLAYER_LOGIN" then
         ApplySavedAnchorState()
         SuppressStockRollFrame()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r loaded. Type /cleanrolls for options.")
+        debugEnabled = (CleanRollsDB.debug == true) -- same SavedVariables-timing reasoning as ApplySavedAnchorState above
+        if debugEnabled then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r loaded. Debug logging is ON (/cr debug to turn off).")
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r loaded. Type /cleanrolls for options.")
+        end
+    elseif event == "PLAYER_LOGOUT" then
+        FlushDebugLog() -- make sure the last few buffered lines aren't lost when the session ends
     end
 end)
 
 -- ===================== Ticker: timers / fade / scheduled tasks / cleanup =====================
 
 local tickAccum = 0
+local debugFlushAccum = 0
 eventFrame:SetScript("OnUpdate", function()
     tickAccum = tickAccum + arg1
     if tickAccum < 0.1 then return end
     tickAccum = 0
+
+    -- periodic debug-log flush, independent of the 0.1s tick rate above -
+    -- buffering avoids a WriteCustomFile disk write on every single log
+    -- line during a busy raid moment (see LogLine's own comment)
+    if debugEnabled then
+        debugFlushAccum = debugFlushAccum + 0.1
+        if debugFlushAccum >= 5 then
+            debugFlushAccum = 0
+            FlushDebugLog()
+        end
+    end
 
     local now = GetTime()
     local toRemove = nil -- collected, not removed in-loop: table.remove-ing from `order`
@@ -1673,6 +1878,16 @@ SlashCmdList["CLEANROLLS"] = function(msg)
         anchor:Show()
         Reflow()
         DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r: header back - drag it to reposition.")
+    elseif msg == "debug" then
+        debugEnabled = not debugEnabled
+        CleanRollsDB.debug = debugEnabled
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r: debug logging " .. (debugEnabled and "ON" or "OFF") .. ".")
+        if debugEnabled and not WriteCustomFile then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r: WriteCustomFile isn't available on this Nampower build - can't write the debug log to file.")
+        end
+    elseif msg == "flush" then
+        FlushDebugLog()
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r: debug log flushed to " .. DEBUG_LOG_FILENAME .. ".")
     elseif msg == "test" then
         local stamp = tostring(GetTime())
 
@@ -1854,5 +2069,7 @@ SlashCmdList["CLEANROLLS"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("  /cr reset   - reset window position")
         DEFAULT_CHAT_FRAME:AddMessage("  /cr lock    - hide the \"Loot Rolls\" header to save space")
         DEFAULT_CHAT_FRAME:AddMessage("  /cr unlock  - bring the header back so you can drag it")
+        DEFAULT_CHAT_FRAME:AddMessage("  /cr debug   - toggle debug logging to " .. DEBUG_LOG_FILENAME .. " (off by default)")
+        DEFAULT_CHAT_FRAME:AddMessage("  /cr flush   - force-write the debug log now, instead of waiting for the next periodic flush")
     end
 end
