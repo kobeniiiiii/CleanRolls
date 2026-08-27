@@ -15,12 +15,14 @@ If **pfUI** is also installed, the window automatically matches its look - no co
 
 Nothing to turn on - it starts watching the moment you log in. A small **Loot Rolls** title bar shows up on the right side of your screen; drag it anywhere.
 
-- `/cleanrolls` or `/cr` - full command list
-- `/cr lock` - hide the title bar to save space once you've got it positioned; `/cr unlock` brings it back
-- `/cr reset` - reset window position
-- `/cr test` - preview the window with fake rolls (no real loot needed)
-- `/cr rftest` / `/cr rfbtest` - same, for the RollFor integration specifically
-- `/cr debug` - off by default; logs exactly what chat text/RollFor broadcasts arrive and how they're parsed to `CleanRolls_debug.log` (in the client's `CustomData` folder, requires Nampower v3.2+) instead of spamming chat, for troubleshooting after a raid rather than during one
+- `/cleanrolls` or `/lr` - full command list
+- `/lr lock` - hide the title bar to save space once you've got it positioned; `/lr unlock` brings it back
+- `/lr reset` - reset window position
+- `/lr test` - preview the window with fake rolls (no real loot needed)
+- `/lr rftest` / `/lr rfbtest` - same, for the RollFor integration specifically
+- `/lr debug` - off by default; logs exactly what chat text/RollFor broadcasts arrive and how they're parsed to `CleanRolls_debug.log` (in the client's `CustomData` folder, requires Nampower v3.2+) instead of spamming chat, for troubleshooting after a raid rather than during one
+
+(The short alias is `/lr`, not `/cr` - [RollFor](https://github.com/sica42/RollFor) registers `/cr` itself as its own "cancel current roll" command, and there's no way for two addons to share the exact same slash text. `/cleanrolls` always works regardless.)
 
 ## How it works
 

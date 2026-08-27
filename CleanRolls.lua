@@ -5,7 +5,7 @@ local PLAYER_NAME = UnitName("player")
 
 CleanRollsDB = CleanRollsDB or {}
 
--- Delayed one-shot callback. Used by /cr test to make fake rolls trickle
+-- Delayed one-shot callback. Used by /lr test to make fake rolls trickle
 -- in one at a time instead of all appearing at once. Prefers ClassicAPI's
 -- real C_Timer.After when present; falls back to a plain OnUpdate-driven
 -- queue (checked against the same ticker below) so this doesn't hard-require
@@ -34,7 +34,7 @@ local rollforPending = {}
 local currentRollForItem = nil
 
 -- ===================== Debug logging =====================
--- Off by default - toggle with /cr debug. Writes to a real file
+-- Off by default - toggle with /lr debug. Writes to a real file
 -- (WriteCustomFile, a Nampower v3.2+ API) instead of chat, so it doesn't
 -- spam the screen during a live raid - same pattern as CombatLedger's own
 -- CL.LogLine/FlushLog (see CombatLedger/Core.lua). WriteCustomFile lands
@@ -42,7 +42,7 @@ local currentRollForItem = nil
 -- the WoW install root) - find CleanRolls_debug.log there afterward to
 -- see exactly what chat text/broadcasts arrived and how each one got
 -- parsed. Built specifically to debug the RollFor SR/HR paths, since
--- those are the ones that can't be exercised by /cr test/rftest/rfbtest
+-- those are the ones that can't be exercised by /lr test/rftest/rfbtest
 -- against real server wording.
 local DEBUG_LOG_FILENAME = "CleanRolls_debug.log"
 local debugEnabled = false
@@ -572,7 +572,7 @@ end
 -- Seconds left on this item's roll, or nil if we don't know a deadline at
 -- all (we're only observing someone else's roll via chat, never got our
 -- own START_LOOT_ROLL for it). A real rollID is authoritative
--- (GetLootRollTimeLeft); /cr test's simulated items use the same
+-- (GetLootRollTimeLeft); /lr test's simulated items use the same
 -- rollTime/rollStart fields so they drive the exact same countdown bar,
 -- not a separate fake-looking readout.
 local function GetTimeLeft(data)
@@ -782,7 +782,7 @@ local function RefreshPanel(itemKey)
     -- roll-now controls: shown whenever we're still eligible and haven't
     -- rolled/resolved yet, sitting in the header row itself (to the right
     -- of the name) rather than a separate row below it. Covers both a
-    -- real live roll and /cr test's simulated one - only the timer/status
+    -- real live roll and /lr test's simulated one - only the timer/status
     -- row below tells them apart.
     local showButtons = data.canRoll and not data.hasRolled and not data.winner
 
@@ -1713,7 +1713,7 @@ eventFrame:SetScript("OnEvent", function()
         SuppressStockRollFrame()
         debugEnabled = (CleanRollsDB.debug == true) -- same SavedVariables-timing reasoning as ApplySavedAnchorState above
         if debugEnabled then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r loaded. Debug logging is ON (/cr debug to turn off).")
+            DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r loaded. Debug logging is ON (/lr debug to turn off).")
         else
             DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r loaded. Type /cleanrolls for options.")
         end
@@ -1785,7 +1785,7 @@ eventFrame:SetScript("OnUpdate", function()
                 RefreshPanel(itemKey)
             end
 
-            -- /cr test items: there's no real server to announce a winner,
+            -- /lr test items: there's no real server to announce a winner,
             -- so once the simulated timer runs out, pick one ourselves from
             -- whoever's rolled so far (same priority/value ranking the
             -- window already displays) - otherwise these would just sit
@@ -1859,8 +1859,19 @@ end)
 
 -- ===================== Slash commands =====================
 
+-- "/cr" was the original short alias, but RollFor's own main.lua registers
+-- that exact text too (SLASH_CR1 = "/cr", its own "cancel current roll"
+-- command) - whichever addon's file happens to load later wins that exact
+-- slash text outright, and there's no way to have both. Since CleanRolls
+-- specifically targets people who ARE running RollFor, keeping "/cr" here
+-- would mean it silently never works for exactly the audience that most
+-- wants it, so "/lr" (for "Loot Rolls", matching the window's own title)
+-- replaces it instead - not merely one that happens to currently be free,
+-- checked directly against every slash command RollFor's own
+-- setup_slash_commands() registers (rf/arf/rr/irr/htr/cr/fr/ssr/rfr/sr/
+-- srs/src/sro/rfw/rfo/rft/pl - none of those are "lr").
 SLASH_CLEANROLLS1 = "/cleanrolls"
-SLASH_CLEANROLLS2 = "/cr"
+SLASH_CLEANROLLS2 = "/lr"
 SlashCmdList["CLEANROLLS"] = function(msg)
     msg = string.lower(msg or "")
     if msg == "reset" then
@@ -1872,7 +1883,7 @@ SlashCmdList["CLEANROLLS"] = function(msg)
         CleanRollsDB.locked = true
         anchor:Hide()
         Reflow()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r: header hidden. /cr unlock to bring it back and reposition.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r: header hidden. /lr unlock to bring it back and reposition.")
     elseif msg == "unlock" then
         CleanRollsDB.locked = false
         anchor:Show()
@@ -1978,7 +1989,7 @@ SlashCmdList["CLEANROLLS"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r: spawned 3 test rolls - names will trickle in over the next several seconds, then resolve on their own, just like a real roll.")
     elseif msg == "rftest" then
         -- Feeds fake lines through the REAL RollFor parsing functions (not
-        -- just synthetic display data, unlike /cr test) - exercises the
+        -- just synthetic display data, unlike /lr test) - exercises the
         -- actual regexes end-to-end. Item icon/quality may not resolve if
         -- the client has never cached these specific items - that's fine,
         -- the point is checking the chat-text parsing, not the icon art.
@@ -1998,7 +2009,7 @@ SlashCmdList["CLEANROLLS"] = function(msg)
         -- what you actually want. You should see a Need button here -
         -- click it to test the real /roll (goes out via RandomRoll, so
         -- it'll actually show in your chat too). Given a 15s simulated
-        -- timer (same auto-resolve mechanism /cr test uses) so it actually
+        -- timer (same auto-resolve mechanism /lr test uses) so it actually
         -- picks a winner - whoever's highest by then, including you if you
         -- clicked - instead of sitting unresolved until the 90s stale-
         -- timeout fallback, which felt like it was stuck forever.
@@ -2062,14 +2073,14 @@ SlashCmdList["CLEANROLLS"] = function(msg)
 
         DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r: fed 4 fake RollFor addon-comm messages (START_ROLL/ROLL/ROLL/FINISH) through the real broadcast decoder - if this looks right, the loadstring deserialization is working.")
     else
-        DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r commands: (/cleanrolls or /cr)")
-        DEFAULT_CHAT_FRAME:AddMessage("  /cr test    - preview the window with fake rolls")
-        DEFAULT_CHAT_FRAME:AddMessage("  /cr rftest  - preview RollFor chat-text SR/HR parsing with fake chat lines")
-        DEFAULT_CHAT_FRAME:AddMessage("  /cr rfbtest - preview RollFor addon-comm broadcast parsing with fake messages")
-        DEFAULT_CHAT_FRAME:AddMessage("  /cr reset   - reset window position")
-        DEFAULT_CHAT_FRAME:AddMessage("  /cr lock    - hide the \"Loot Rolls\" header to save space")
-        DEFAULT_CHAT_FRAME:AddMessage("  /cr unlock  - bring the header back so you can drag it")
-        DEFAULT_CHAT_FRAME:AddMessage("  /cr debug   - toggle debug logging to " .. DEBUG_LOG_FILENAME .. " (off by default)")
-        DEFAULT_CHAT_FRAME:AddMessage("  /cr flush   - force-write the debug log now, instead of waiting for the next periodic flush")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99CleanRolls|r commands: (/cleanrolls or /lr)")
+        DEFAULT_CHAT_FRAME:AddMessage("  /lr test    - preview the window with fake rolls")
+        DEFAULT_CHAT_FRAME:AddMessage("  /lr rftest  - preview RollFor chat-text SR/HR parsing with fake chat lines")
+        DEFAULT_CHAT_FRAME:AddMessage("  /lr rfbtest - preview RollFor addon-comm broadcast parsing with fake messages")
+        DEFAULT_CHAT_FRAME:AddMessage("  /lr reset   - reset window position")
+        DEFAULT_CHAT_FRAME:AddMessage("  /lr lock    - hide the \"Loot Rolls\" header to save space")
+        DEFAULT_CHAT_FRAME:AddMessage("  /lr unlock  - bring the header back so you can drag it")
+        DEFAULT_CHAT_FRAME:AddMessage("  /lr debug   - toggle debug logging to " .. DEBUG_LOG_FILENAME .. " (off by default)")
+        DEFAULT_CHAT_FRAME:AddMessage("  /lr flush   - force-write the debug log now, instead of waiting for the next periodic flush")
     end
 end
