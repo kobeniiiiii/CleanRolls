@@ -1598,8 +1598,17 @@ eventFrame:RegisterEvent("CHAT_MSG_LOOT")
 eventFrame:RegisterEvent("START_LOOT_ROLL")
 eventFrame:RegisterEvent("CANCEL_LOOT_ROLL")
 eventFrame:RegisterEvent("CHAT_MSG_RAID")
+-- CHAT_MSG_RAID_LEADER fires INSTEAD OF CHAT_MSG_RAID (not alongside it)
+-- specifically when the message came from whoever currently holds Raid
+-- Leader status - confirmed live via debug log: every item-announcement
+-- line the raid leader posted (who was also running RollFor) never
+-- showed up under CHAT_MSG_RAID at all, while a CHAT_MSG_RAID_WARNING
+-- line from the same person came through fine. Same relationship exists
+-- for 5-mans (CHAT_MSG_PARTY_LEADER vs CHAT_MSG_PARTY).
+eventFrame:RegisterEvent("CHAT_MSG_RAID_LEADER")
 eventFrame:RegisterEvent("CHAT_MSG_RAID_WARNING")
 eventFrame:RegisterEvent("CHAT_MSG_PARTY")
+eventFrame:RegisterEvent("CHAT_MSG_PARTY_LEADER")
 eventFrame:RegisterEvent("CHAT_MSG_SYSTEM")
 eventFrame:RegisterEvent("CHAT_MSG_ADDON")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
@@ -1688,7 +1697,8 @@ eventFrame:SetScript("OnEvent", function()
                 Reflow()
             end
         end
-    elseif event == "CHAT_MSG_RAID" or event == "CHAT_MSG_RAID_WARNING" or event == "CHAT_MSG_PARTY" then
+    elseif event == "CHAT_MSG_RAID" or event == "CHAT_MSG_RAID_LEADER" or event == "CHAT_MSG_RAID_WARNING"
+        or event == "CHAT_MSG_PARTY" or event == "CHAT_MSG_PARTY_LEADER" then
         LogLine("[" .. event .. "] " .. arg1)
         if HandleRollForWinnerLine(arg1) then
             LogLine("[" .. event .. "] -> matched a RollFor winner/resolution line")
