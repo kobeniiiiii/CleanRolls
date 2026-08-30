@@ -33,6 +33,15 @@ local rollforPending = {}
 -- defined earlier in the file, needs to reference it directly.
 local currentRollForItem = nil
 
+-- Retries a GetItemInfo lookup for an item whose icon/quality weren't in
+-- the client's local item cache yet the first time GetOrCreateItem asked
+-- (vanilla returns nil for everything on an uncached item and kicks off an
+-- async server query in the background) - see GetOrCreateItem and the
+-- definition below RefreshPanel. Forward-declared here for the same reason
+-- as rollforPending/currentRollForItem above: GetOrCreateItem, defined
+-- earlier in the file, needs to reference it directly.
+local TryResolveItemIcon
+
 -- ===================== Debug logging =====================
 -- Off by default - toggle with /lr debug. Writes to a real file
 -- (WriteCustomFile, a Nampower v3.2+ API) instead of chat, so it doesn't
@@ -263,12 +272,20 @@ local function GetOrCreateItem(baseItemKey, itemName, itemLink, storageKey)
     storageKey = storageKey or baseItemKey
     local data = active[storageKey]
     if data then
-        data.lastActivity = GetTime()
-        if data.fading then
-            -- new activity on an item that was about to disappear: keep it
-            data.fading = false
-            data.fadeStart = nil
-            if data.panel then data.panel:SetAlpha(1) end
+        -- a redundant re-announce of an already-resolved item (e.g. someone
+        -- re-linking the same drop in chat after it's already been won)
+        -- must NOT count as new activity - otherwise it keeps resetting
+        -- lastActivity (and reviving a panel that already started fading),
+        -- so the window never actually expires. Only genuinely still-open
+        -- items get their clock bumped/fade cancelled here.
+        if not data.winner and not data.resolved then
+            data.lastActivity = GetTime()
+            if data.fading then
+                -- new activity on an item that was about to disappear: keep it
+                data.fading = false
+                data.fadeStart = nil
+                if data.panel then data.panel:SetAlpha(1) end
+            end
         end
         return data
     end
@@ -290,6 +307,20 @@ local function GetOrCreateItem(baseItemKey, itemName, itemLink, storageKey)
     data.baseItemKey = baseItemKey
     active[storageKey] = data
     table.insert(order, storageKey)
+
+    if not texture and GetItemInfo then
+        -- not in the client's local item cache yet (common for
+        -- less-common random-suffix items like "of Intellect" gear) -
+        -- GetItemInfo returned all nils and quietly kicked off an async
+        -- server query in the background. Without a retry the icon box
+        -- just stays permanently blank even though the name/winner text
+        -- (which come from chat text, not GetItemInfo) are fine - which is
+        -- exactly what made this look like the unrelated "some textures
+        -- just fail to load" quirk. Poll a few times; the panel is usually
+        -- gone within DISPLAY_HOLD_TIME anyway so this gives up quickly.
+        ScheduleTask(1, function() TryResolveItemIcon(storageKey, baseItemKey, 1) end)
+    end
+
     return data
 end
 
@@ -331,6 +362,14 @@ local function FindOrCreateNativeItem(itemID, suffixID, name, itemText)
 end
 
 local function AddOrUpdateRoll(data, name, kind, value)
+    if not name then
+        -- a nil key would crash the table.insert/rollsByName write below
+        -- outright ("table index is nil") - defense in depth for whichever
+        -- caller's upstream data turned out malformed, on top of fixing
+        -- the actual root cause (see DecodeRollForPayload's own comment)
+        LogLine("[ADD_ROLL] dropped - nil name (kind=" .. tostring(kind) .. " value=" .. tostring(value) .. ")")
+        return
+    end
     local isSelf = (name == PLAYER_NAME or name == "You")
     if isSelf then name = PLAYER_NAME end
 
@@ -927,6 +966,21 @@ local function RefreshPanel(itemKey)
     p:Show()
 end
 
+TryResolveItemIcon = function(storageKey, baseItemKey, attempt)
+    local data = active[storageKey]
+    if not data or data.icon then return end -- gone, or resolved some other way already
+    local iName, iLink, iQuality, _, _, _, _, _, iTexture = GetItemInfo(ItemStringForKey(baseItemKey))
+    if iTexture then
+        data.icon = iTexture
+        if iQuality then data.quality = iQuality end
+        RefreshPanel(storageKey)
+        return
+    end
+    if attempt < 6 then
+        ScheduleTask(1, function() TryResolveItemIcon(storageKey, baseItemKey, attempt + 1) end)
+    end
+end
+
 local function Reflow()
     -- a hidden (locked) anchor still works fine as a position reference for
     -- SetPoint below - Hide() only stops it from rendering/being clickable,
@@ -1121,6 +1175,8 @@ end
 -- (rollforPending itself is declared near the top of the file, above
 -- DoRollForNeed, which needs to reference it directly.)
 local function RollForPushPending(itemKey)
+    local data = active[itemKey]
+    if data and (data.winner or data.resolved) then return end -- already resolved (e.g. a redundant re-announce) - don't revive its pending slot
     for _, k in ipairs(rollforPending) do
         if k == itemKey then return end -- already queued (e.g. both the chat-text and broadcast paths saw it)
     end
@@ -1367,12 +1423,35 @@ local ROLLFOR_TYPE_KIND = {
 -- table-constructor syntax - e.g. {["i"]={["id"]=19019,...},["s"]=60} -
 -- so it's directly loadable as Lua code instead of needing a hand-written
 -- parser for their custom format.
+-- RollFor's own serializer (src/modules.lua M.dump) does NOT quote string
+-- values - for anything that isn't a table it just does tostring(v), so a
+-- string field like a player or item name comes out as a bare, UNQUOTED
+-- word (e.g. ["pn"]=Thugz, ["n"]=Girdle_of_Prophecy). Handed straight to
+-- loadstring, Lua reads that as a reference to an undefined global
+-- variable, not a string literal - which silently evaluates to nil
+-- instead of erroring, so EVERY string field in a decoded payload came
+-- out nil (player names, item names, roll types, class names, ...) while
+-- numbers/nested tables/nil/true/false decoded correctly. Confirmed live
+-- via debug log (RF_BC_START/RF_BC_ROLL showing name=nil/rt=nil against
+-- genuinely non-empty raw payload text) - not a hypothetical edge case,
+-- this broke every single string field in every broadcast. Quoting every
+-- bare-word value before decoding (skipping the nil/true/false keywords,
+-- which must stay unquoted, and leaving numbers and "{" nested-table
+-- values alone since those already decode correctly) fixes it.
+local function QuoteBareRollForValue(word)
+    if word == "nil" or word == "true" or word == "false" then
+        return "=" .. word
+    end
+    return '="' .. word .. '"'
+end
+
 local function DecodeRollForPayload(dataStr)
     if not dataStr or dataStr == "" or dataStr == "nil" then return nil end
     if not loadstring then
         LogLine("[RF_BC_DECODE] loadstring not available on this client - can't decode broadcast payloads at all")
         return nil
     end
+    dataStr = string.gsub(dataStr, "=([%a_][%w_]*)", QuoteBareRollForValue)
     local chunk = loadstring("return " .. dataStr)
     if not chunk then
         LogLine("[RF_BC_DECODE] loadstring FAILED to compile - dataStr=" .. dataStr)
