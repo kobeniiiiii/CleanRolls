@@ -305,13 +305,21 @@ local function GetOrCreateItem(baseItemKey, itemName, itemLink, storageKey)
     -- grabs sellPrice (a number) as if it were a texture path, which
     -- SetTexture doesn't error on - it just renders as the red
     -- missing-texture placeholder instead of failing loudly.
-    local texture, name, quality
+    local texture, name, quality, link
     if GetItemInfo then
         local iName, iLink, iQuality, _, _, _, _, _, iTexture = GetItemInfo(ItemStringForKey(baseItemKey))
-        texture, name, quality = iTexture, iName, iQuality
+        texture, name, quality, link = iTexture, iName, iQuality, iLink
     end
 
-    data = NewItemData(storageKey, name or itemName, itemLink, texture, quality)
+    -- prefer GetItemInfo's own hyperlink over whatever the caller passed in
+    -- - it's Blizzard's canonical, correctly-formatted link. The RollFor
+    -- broadcast path in particular only ever has a hand-built bare item
+    -- string ("item:12345:0:0:0", no |H/|h wrapper at all - see
+    -- HandleRollForStart) to fall back on, which some other addons'
+    -- tooltip hooks don't recognize as a link at all and error on
+    -- ("Unknown link type") instead of just ignoring gracefully like
+    -- Blizzard's own SetHyperlink does.
+    data = NewItemData(storageKey, name or itemName, link or itemLink, texture, quality)
     data.baseItemKey = baseItemKey
     active[storageKey] = data
     table.insert(order, storageKey)
@@ -1013,6 +1021,7 @@ TryResolveItemIcon = function(storageKey, baseItemKey, attempt)
     if iTexture then
         data.icon = iTexture
         if iQuality then data.quality = iQuality end
+        if iLink then data.itemLink = iLink end -- swap in the real hyperlink once it's available - see GetOrCreateItem's own comment
         RefreshPanel(storageKey)
         return
     end
@@ -1550,7 +1559,14 @@ local function HandleRollForStart(payload)
     local itemID = payload.i.id
     local itemKey = ItemKey(itemID, "0")
     local rawName = payload.i.n and string.gsub(payload.i.n, "_", " ") or nil
-    local itemLink = "item:" .. itemID .. ":0:0:0"
+    -- a real |Hitem:...|h[Name]|h|r shape (just uncolored), not a bare
+    -- "item:ID:0:0:0" string - only used until GetOrCreateItem's own
+    -- GetItemInfo call resolves the real one (immediately, or via
+    -- TryResolveItemIcon's retry - see both their comments), but some
+    -- other addons' tooltip hooks choke outright on a link with no |H
+    -- prefix at all instead of ignoring it the way Blizzard's own
+    -- SetHyperlink does, so this needs to at least look like a real link.
+    local itemLink = "|Hitem:" .. itemID .. ":0:0:0|h[" .. (rawName or "Item") .. "]|h"
 
     local data = GetOrCreateItem(itemKey, rawName, itemLink)
     data.isRollFor = true
