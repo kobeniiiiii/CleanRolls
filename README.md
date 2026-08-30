@@ -34,6 +34,7 @@ A panel pops up the moment an item starts being rolled on, with the item's icon 
 - **A real countdown**, while you still have a decision to make - your actual roll timer if it's your own eligible roll, otherwise an honest "no timer available" readout if you're only watching someone else's roll play out.
 - **The winner's row flashes gold, then eases into green** and stays there, so you don't have to go hunting for the "X won it!" line.
 - Every outcome resolves and fades on its own: someone wins, everyone passes, nobody rolls at all, or the roll times out - each one clears the panel after a few seconds instead of leaving it stuck open.
+- RollFor items also get a small **X** in the top-right corner to dismiss them by hand, in case chat parsing or a broadcast ever misses something. Plain Need/Greed/Pass rolls don't need one - they carry a real roll ID straight from the client, so they always resolve or clear on their own.
 
 ## RollFor support
 

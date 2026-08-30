@@ -81,6 +81,14 @@ end
 -- ===================== Config =====================
 
 local DISPLAY_HOLD_TIME = 5.5   -- seconds to keep a finished/won item visible before fading
+-- HR items resolve themselves the instant they're announced (their badge
+-- IS the resolution - no roll, no winner line, ever) while everything else
+-- in the same multi-item drop is still mid-roll (each RollFor item has its
+-- own ~8s window, one at a time) - the normal short hold made an HR item
+-- vanish while its siblings from the exact same "Ragnaros dropped 9
+-- items:" announcement were still sitting there being rolled on, making it
+-- look like it never showed up at all.
+local HR_DISPLAY_HOLD_TIME = 25 -- seconds to keep an HR item visible - long enough to still be up once the rest of a multi-item drop has been dealt with
 local FADE_TIME = 1.0           -- seconds to fade out over
 local STALE_TIMEOUT = 90        -- seconds of no activity before we give up on a roll with no winner line
 local ROLL_TIMEOUT_GRACE = 3    -- extra seconds after a roll timer hits 0 before we start the fade
@@ -479,6 +487,26 @@ local function AcquirePanel()
     p:SetFrameStrata("MEDIUM")
     ApplyWindowSkin(p, 0.8)
 
+    -- Manual dismiss - a plain escape hatch for whenever a panel ends up
+    -- in a state that isn't going to resolve itself (a chat pattern that
+    -- didn't match, a broadcast that got dropped, anything else nobody's
+    -- hit yet) rather than trusting every fade/timeout path to be bug-free.
+    -- Sits poking out past the panel's own top-right corner instead of
+    -- inset like CombatLedger's dialog close buttons (see UI_DeathRecap.lua
+    -- etc.) - there's no dedicated header row here to put it in without
+    -- colliding with the icon or the Need/Greed/Pass buttons, which also
+    -- anchor to that same corner whenever they're shown.
+    -- Shown/hidden per-refresh (RollFor items only, see RefreshPanel) since
+    -- this same pooled frame gets reused across items of both kinds.
+    p.closeBtn = CreateFrame("Button", nil, p, "UIPanelCloseButton")
+    p.closeBtn:SetWidth(14)
+    p.closeBtn:SetHeight(14)
+    p.closeBtn:SetPoint("TOPRIGHT", p, "TOPRIGHT", 6, 6)
+    p.closeBtn:SetFrameLevel(p:GetFrameLevel() + 5)
+    if HasPfui() then
+        pcall(pfUI.api.SkinCloseButton, p.closeBtn)
+    end
+
     -- Icon border/crop/highlight matches LootLedger's GetIconButton exactly:
     -- a 1px WHITE8X8 edge on the button's own backdrop (BACKGROUND layer),
     -- tinted to the item's quality color, with the icon texture (ARTWORK
@@ -779,6 +807,18 @@ local function RefreshPanel(itemKey)
     p.icon.tex:SetTexture(data.icon)
     p.icon.itemLink = data.itemLink
     p.name:SetText(data.itemName)
+
+    -- manual dismiss - only for RollFor-sourced items (chat-text or the
+    -- addon-comm broadcast), which don't carry a real rollID and lean on
+    -- fragile chat parsing / an external addon's broadcasts to ever
+    -- resolve. Plain Need/Greed/Pass rolls carry an authoritative rollID
+    -- straight from the client (GetLootRollTimeLeft etc.) and reliably
+    -- resolve or stale-timeout on their own, so they don't need one.
+    if data.isRollFor then
+        p.closeBtn:Show()
+    else
+        p.closeBtn:Hide()
+    end
     -- window chrome (the panel's own outer border) stays flat/pfUI-skinned
     -- regardless of item quality, matching the house style's "match pfUI
     -- means look like pfUI" rule - but the icon SLOT's own 1px border, like
@@ -1031,6 +1071,9 @@ WireButtons = function(p)
     p.passBtn:SetScript("OnClick", function()
         if p.itemKey then DoRoll(p.itemKey, 0, "PASS"); RefreshPanel(p.itemKey); Reflow() end
     end)
+    p.closeBtn:SetScript("OnClick", function()
+        if p.itemKey then RemoveItem(p.itemKey) end
+    end)
 end
 
 -- ===================== Event handling =====================
@@ -1202,6 +1245,7 @@ local function HandleRollForItemLine(text)
         local itemKey = ItemKey(itemID, suffixID)
         local data = GetOrCreateItem(itemKey, name, hrItemText)
         LogLine("[RF_ITEM] HR itemKey=" .. itemKey .. " name=" .. tostring(name) .. " icon=" .. tostring(data.icon) .. " quality=" .. tostring(data.quality))
+        data.isRollFor = true
         data.isHR = true
         data.canRoll = false
         data.resolved = true -- no real "awarded" chat line ever comes for HR - the badge itself is the resolution
@@ -1224,6 +1268,7 @@ local function HandleRollForItemLine(text)
         end
         local itemKey = ItemKey(itemID, suffixID)
         local data = GetOrCreateItem(itemKey, name, srItemText)
+        data.isRollFor = true
         data.srList = SplitNameList(srListText)
         LogLine("[RF_ITEM] SR itemKey=" .. itemKey .. " name=" .. tostring(name)
             .. " rawSrListText=\"" .. srListText .. "\" parsedNames=" .. table.concat(data.srList, "|")
@@ -1260,6 +1305,7 @@ local function HandleRollForItemLine(text)
         if not itemID then return false end -- not actually an item line (e.g. unrelated raid chat starting with a number)
         local itemKey = ItemKey(itemID, suffixID)
         local data = GetOrCreateItem(itemKey, name, freeItemText)
+        data.isRollFor = true
         LogLine("[RF_ITEM] free-roll itemKey=" .. itemKey .. " name=" .. tostring(name))
         RollForPushPending(itemKey)
         RefreshPanel(itemKey)
@@ -1507,6 +1553,7 @@ local function HandleRollForStart(payload)
     local itemLink = "item:" .. itemID .. ":0:0:0"
 
     local data = GetOrCreateItem(itemKey, rawName, itemLink)
+    data.isRollFor = true
     if rawName then data.itemName = rawName end
     if payload.i.tx and payload.i.tx ~= "" then
         data.icon = "Interface\\Icons\\" .. payload.i.tx
@@ -1900,7 +1947,8 @@ eventFrame:SetScript("OnUpdate", function()
 
             if not data.fading then
                 local shouldFade = false
-                if (data.winner or data.resolved) and (now - data.lastActivity) > DISPLAY_HOLD_TIME then
+                local holdTime = data.isHR and HR_DISPLAY_HOLD_TIME or DISPLAY_HOLD_TIME
+                if (data.winner or data.resolved) and (now - data.lastActivity) > holdTime then
                     -- `resolved` covers anything we know for certain is
                     -- done even without a winner to show - "Everyone has
                     -- passed", "No one rolled for X.", an empty RollFor
@@ -1910,7 +1958,9 @@ eventFrame:SetScript("OnUpdate", function()
                     -- resolved). All of these hold for the normal amount
                     -- of time instead of sitting for the full 90s
                     -- stale-timeout fallback below, which is for when we
-                    -- genuinely don't know what happened, not when we do.
+                    -- genuinely don't know what happened, not when we do -
+                    -- except HR, which gets its own longer hold (see
+                    -- HR_DISPLAY_HOLD_TIME's own comment above).
                     shouldFade = true
                 elseif (not data.winner) and (not data.resolved) and (now - data.lastActivity) > STALE_TIMEOUT then
                     shouldFade = true
