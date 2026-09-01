@@ -544,6 +544,16 @@ local function AcquirePanel()
         GameTooltip:Show()
     end)
     p.icon:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    -- Ctrl-click to preview in the dressing room, same as ctrl-clicking a
+    -- real chat item link - our icon is a plain Button, not a hyperlink-
+    -- enabled FontString, so this doesn't happen automatically the way it
+    -- does for chat and needs wiring up by hand.
+    p.icon:RegisterForClicks("LeftButtonUp")
+    p.icon:SetScript("OnClick", function()
+        if this.itemLink and IsControlKeyDown and IsControlKeyDown() and DressUpItemLink then
+            DressUpItemLink(this.itemLink)
+        end
+    end)
 
     p.rows = {}
 
