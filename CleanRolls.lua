@@ -826,13 +826,17 @@ local function RefreshPanel(itemKey)
     p.icon.itemLink = data.itemLink
     p.name:SetText(data.itemName)
 
-    -- manual dismiss - only for RollFor-sourced items (chat-text or the
-    -- addon-comm broadcast), which don't carry a real rollID and lean on
-    -- fragile chat parsing / an external addon's broadcasts to ever
-    -- resolve. Plain Need/Greed/Pass rolls carry an authoritative rollID
-    -- straight from the client (GetLootRollTimeLeft etc.) and reliably
-    -- resolve or stale-timeout on their own, so they don't need one.
-    if data.isRollFor then
+    -- manual dismiss. RollFor-sourced items (chat-text or the addon-comm
+    -- broadcast) always get it - they don't carry a real rollID and lean
+    -- on fragile chat parsing / an external addon's broadcasts to ever
+    -- resolve. Plain Need/Greed/Pass rolls only get it once you've
+    -- actually rolled yourself - there's nothing left for YOU to do at
+    -- that point, but the panel still has to sit open waiting on everyone
+    -- else, which with a big multi-item drop and slow looters can pile up
+    -- a screen full of panels you're personally done with; before you've
+    -- rolled, it stays hidden so the Need/Greed/Pass buttons aren't
+    -- competing with it.
+    if data.isRollFor or data.hasRolled then
         p.closeBtn:Show()
     else
         p.closeBtn:Hide()
@@ -1107,9 +1111,26 @@ local WIN_LINE_PATTERN = "^(.-) won: (.+)$"
 -- vanilla LOOT_ROLL_GREED/NEED/PASSED wording, so "You" needs the same
 -- self-name mapping as elsewhere.
 local HAS_SELECTED_PATTERN = "^(.+) has selected (%a+) for: (.+)$"
+-- The player's OWN "has selected" line is second-person ("You HAVE
+-- selected..."), not third-person ("X HAS selected...") like everyone
+-- else's - a real grammar difference, not just a name swap, so it needs
+-- its own pattern; HAS_SELECTED_PATTERN above never matches it at all.
+-- Confirmed via a real raid debug log: "You have selected Greed for: ..."
+-- logged as "-> no pattern matched", meaning the addon never found out the
+-- player themselves had rolled until the much later numeric batch reveal
+-- (see ROLL_LINE_PATTERN's own comment) - same moment everyone else's
+-- roll became known, making "show something once I've rolled" (canRoll
+-- buttons hiding, the manual dismiss X appearing) effectively wait for
+-- the entire raid instead.
+local YOU_HAS_SELECTED_PATTERN = "^You have selected (%a+) for: (.+)$"
 -- Pass uses different wording than Need/Greed ("has passed on:", not "has
 -- selected Pass for:") so it needs its own pattern, same live-signal idea.
 local HAS_PASSED_PATTERN = "^(.+) has passed on: (.+)$"
+-- Same second-person-vs-third-person gap as YOU_HAS_SELECTED_PATTERN
+-- above, for the same reason - untested live (no self-pass seen yet in a
+-- debug log), but vanilla's LOOT_ROLL_GREED/NEED/PASSED strings all follow
+-- this identical you/has-vs-have convention, so this is the same fix.
+local YOU_HAS_PASSED_PATTERN = "^You have passed on: (.+)$"
 -- Fires instead of a "won:" line when literally nobody wants the item -
 -- there's no winner to report, but it's just as definitive a resolution.
 local EVERYONE_PASSED_PATTERN = "^Everyone has passed on: (.+)$"
@@ -1784,6 +1805,17 @@ eventFrame:SetScript("OnEvent", function()
             return
         end
 
+        -- checked before HAS_SELECTED_PATTERN below - "You have selected"
+        -- doesn't match that third-person pattern at all (see
+        -- YOU_HAS_SELECTED_PATTERN's own comment), so it would otherwise
+        -- fall all the way through to "no pattern matched"
+        local _, _, youSelectedKind, youItemText = string.find(arg1, YOU_HAS_SELECTED_PATTERN)
+        if youSelectedKind then
+            LogLine("[CHAT_LOOT] -> YOU_HAS_SELECTED kind=" .. youSelectedKind)
+            HandleHasSelectedLine("You", youSelectedKind, youItemText)
+            return
+        end
+
         local _, _, selectedName, selectedKind, itemText3 = string.find(arg1, HAS_SELECTED_PATTERN)
         if selectedName then
             LogLine("[CHAT_LOOT] -> HAS_SELECTED player=" .. selectedName .. " kind=" .. selectedKind)
@@ -1798,6 +1830,15 @@ eventFrame:SetScript("OnEvent", function()
         if itemText5 then
             LogLine("[CHAT_LOOT] -> EVERYONE_PASSED")
             HandleEveryonePassedLine(itemText5)
+            return
+        end
+
+        -- same you/has-vs-have gap as YOU_HAS_SELECTED_PATTERN, checked
+        -- before HAS_PASSED_PATTERN for the same reason
+        local _, _, youPassedItemText = string.find(arg1, YOU_HAS_PASSED_PATTERN)
+        if youPassedItemText then
+            LogLine("[CHAT_LOOT] -> YOU_HAS_PASSED")
+            HandleHasPassedLine("You", youPassedItemText)
             return
         end
 
