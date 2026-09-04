@@ -354,24 +354,40 @@ end
 -- the identical reason) - the popup/buttons/timer are the only piece
 -- that can be reliably separated, because those come from the real
 -- rollID via GetLootRollItemInfo/RollOnLoot, not from chat text.
-local function FindOrCreateNativeItem(itemID, suffixID, name, itemText)
+-- `preferConcluded` is for winner lines specifically: a "X won:" line can
+-- only belong to a roll that has actually finished, so among several open
+-- panels for the same item it should claim one whose own roll the client
+-- has already closed out (CANCEL_LOOT_ROLL cleared its rollID) in
+-- preference to one that's still live and waiting on your own click.
+-- Without that, the winner for one copy lands on a different copy you
+-- haven't rolled on yet, and (before the showButtons fix below) took its
+-- roll buttons away with it.
+local function FindOrCreateNativeItem(itemID, suffixID, name, itemText, preferConcluded)
     local baseKey = ItemKey(itemID, suffixID)
 
-    local best, matchCount = nil, 0
+    local best, bestConcluded, matchCount = nil, nil, 0
     for _, key in ipairs(order) do
         local d = active[key]
         if d and d.baseItemKey == baseKey and not d.winner and not d.resolved then
             matchCount = matchCount + 1
+            if preferConcluded and d.rollID == nil
+                and (not bestConcluded or d.createdAt < bestConcluded.createdAt) then
+                bestConcluded = d
+            end
             if not best or d.createdAt < best.createdAt then
                 best = d
             end
         end
     end
-    if best then
+    local chosen = bestConcluded or best
+    if chosen then
         if matchCount > 1 then
-            LogLine("[NATIVE_ATTR] baseKey=" .. baseKey .. " -> " .. matchCount .. " simultaneous open rolls on this item, best-guessed the oldest (itemKey=" .. best.itemKey .. ")")
+            LogLine("[NATIVE_ATTR] baseKey=" .. baseKey .. " -> " .. matchCount
+                .. " simultaneous open rolls on this item, best-guessed "
+                .. (bestConcluded and "the oldest already-closed one" or "the oldest")
+                .. " (itemKey=" .. chosen.itemKey .. ")")
         end
-        return best
+        return chosen
     end
 
     return GetOrCreateItem(baseKey, name, itemText)
@@ -885,7 +901,19 @@ local function RefreshPanel(itemKey)
     -- of the name) rather than a separate row below it. Covers both a
     -- real live roll and /lr test's simulated one - only the timer/status
     -- row below tells them apart.
-    local showButtons = data.canRoll and not data.hasRolled and not data.winner
+    -- data.winner deliberately does NOT gate this when the client still
+    -- reports a live rollID. On a native roll, "this roll is over" is
+    -- signalled authoritatively by CANCEL_LOOT_ROLL (which clears canRoll
+    -- and rollID), whereas data.winner can be a pure guess: with N
+    -- identical items dropping at once, a "X won:" chat line carries no
+    -- rollID, so FindOrCreateNativeItem has to attribute it to one of the
+    -- open panels by age. Letting that guess hide the buttons meant a
+    -- winner line belonging to one copy silently removed your ability to
+    -- roll on a DIFFERENT copy that was still genuinely open - confirmed
+    -- in a debug log where 3x [Essence of Air] dropped, two got rolled,
+    -- and the third sat button-less until it timed out 60s later.
+    local showButtons = data.canRoll and not data.hasRolled
+        and (data.rollID ~= nil or not data.winner)
 
     if showButtons and data.rollForSelfSR then
         -- you SR'd this and it's contested - the only real option is Need,
@@ -1160,13 +1188,23 @@ local function HandleWinLine(winnerName, itemText)
     if not itemID then return end
     -- winner line with no prior roll lines seen for this item at all is
     -- covered by FindOrCreateNativeItem's own fallback (e.g. only one
-    -- eligible roller, so there was nothing else to log before this)
-    local data = FindOrCreateNativeItem(itemID, suffixID, name, itemText)
+    -- eligible roller, so there was nothing else to log before this).
+    -- preferConcluded: see its comment there - a winner belongs to a roll
+    -- that's already over, not to a copy still waiting on your own click.
+    local data = FindOrCreateNativeItem(itemID, suffixID, name, itemText, true)
 
     local isSelf = (winnerName == PLAYER_NAME or winnerName == "You")
     data.winner = {name = isSelf and PLAYER_NAME or winnerName, isSelf = isSelf}
     data.winnerFlashStart = GetTime()
-    data.canRoll = false
+    -- only revoke the roll if the client itself has already closed it out.
+    -- While a real rollID is still live this line may well belong to a
+    -- different copy of the same item (see FindOrCreateNativeItem), and
+    -- CANCEL_LOOT_ROLL is the authoritative "your roll here is over"
+    -- signal - clearing canRoll on a guess is what left a still-open copy
+    -- unrollable when 3x [Essence of Air] dropped together.
+    if not data.rollID then
+        data.canRoll = false
+    end
     data.lastActivity = GetTime()
     RefreshPanel(data.itemKey)
     Reflow()
@@ -1184,7 +1222,12 @@ end
 local function HandleEveryonePassedLine(itemText)
     local itemID, suffixID, name = ExtractItemFromText(itemText)
     if not itemID then return end
-    local data = FindOrCreateNativeItem(itemID, suffixID, name, itemText)
+    -- another conclusion line, so same preferConcluded reasoning and same
+    -- live-rollID guard as HandleWinLine above: attributed to the wrong
+    -- copy of a multi-drop this would otherwise both revoke the buttons on
+    -- a still-open roll and fade its panel out from under you.
+    local data = FindOrCreateNativeItem(itemID, suffixID, name, itemText, true)
+    if data.rollID then return end
 
     -- no winner to report, but just as resolved as one - see `resolved`
     -- flag's own comment for why this needs to fade on the normal timer
